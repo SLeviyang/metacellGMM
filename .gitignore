@@ -1,0 +1,13 @@
+# Only the analysis code and the README are tracked; data, caches, figures and
+# the manuscript stay local.
+/*
+!/.gitignore
+!/README.md
+!/python/
+
+# inside python/
+python/__pycache__/
+python/.claude/
+*.pyc
+.DS_Store
+.Rhistory
