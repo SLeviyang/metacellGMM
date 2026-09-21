@@ -137,7 +137,8 @@ _CBRT_TICKS = [0, 0.001, 0.01, 0.05, 0.1, 0.2, 0.4, 0.6, 1.0]
 
 
 def _plot_adjacency_values(ax, x, y, groups=None, group_colors=None,
-                            xlabel="x", ylabel="y", title="", annotation="fit"):
+                            xlabel="x", ylabel="y", title="", annotation="fit",
+                            label_fontsize=None, title_fontsize=None):
     """Scatter x vs y on cube-root axes, with a y = x reference and the
     linear-space least-squares fit drawn as a red dashed curve.
 
@@ -180,6 +181,11 @@ def _plot_adjacency_values(ax, x, y, groups=None, group_colors=None,
     corner at the larger size the REL ERR annotations of figures_util's
     other figures use, so a caller can put its own statistic there (see
     figures_util.make_knn_figure). The fit line itself is drawn regardless.
+
+    `label_fontsize` and `title_fontsize` set the axis label and title
+    sizes; None (the default) leaves matplotlib's own axes.labelsize and
+    axes.titlesize in place, so only a caller that asks for larger text
+    (figures_util.make_knn_figure) gets it.
     """
     x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
     keep = ~((x == 0) & (y == 0))
@@ -241,9 +247,13 @@ def _plot_adjacency_values(ax, x, y, groups=None, group_colors=None,
     ax.set_xticks(ticks); ax.set_yticks(ticks)
     ax.tick_params(labelsize=8)
     ax.set_xlim(lim); ax.set_ylim(lim)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
+    # an explicit None must not reach matplotlib: Text.set_fontsize(None)
+    # falls back to font.size rather than to axes.labelsize / axes.titlesize
+    label_kw = {} if label_fontsize is None else {"fontsize": label_fontsize}
+    title_kw = {} if title_fontsize is None else {"fontsize": title_fontsize}
+    ax.set_xlabel(xlabel, **label_kw)
+    ax.set_ylabel(ylabel, **label_kw)
+    ax.set_title(title, **title_kw)
 
 
 def get_knn_filename(dataset, n_genes, refined=False):

@@ -36,10 +36,18 @@ VISUALIZE_METACELLS = {"Thymus": "T(agonist)_1_0_0"}
 # the eight <base>_proj_i entries -- those are deliberately left out here.
 SPIKE_SPECTRUM_METHODS = [("NB", "nb"), ("true", "true")]
 
-# Figure 1
+# the gene count of the main and SI bulk figures. The Results describe the
+# bulk fit "for the case of 1000 genes", and the spike, knn, umap and
+# visualize figures are all built at 1000 as well (make.SPIKE_N_GENES); the
+# 2000 and 5000 gene panels appear only in the MP figure's sweep.
+BULK_N_GENES = 1000
+
+
+# Figure 2 (Figure 1 is make_visualize_figure, at the bottom of this file)
 def make_bulk_figure():
     os.makedirs(FIGURE_DIR, exist_ok=True)
-    fig = fu.make_bulk_figure(dataset_list=DEFAULT_FIGURE_DATASETS, show=False)
+    fig = fu.make_bulk_figure(dataset_list=DEFAULT_FIGURE_DATASETS,
+                              n_genes=BULK_N_GENES, show=False)
     fig.savefig(os.path.join(FIGURE_DIR, "figure_bulk.pdf"))
     return fig
 
@@ -50,7 +58,7 @@ def make_bulk_figure_SI():
     os.makedirs(FIGURE_DIR, exist_ok=True)
     si_datasets = [d for d in datasets.DEFAULT_DATASETS
                    if d not in DEFAULT_FIGURE_DATASETS]
-    fig = fu.make_bulk_figure(dataset_list=si_datasets,
+    fig = fu.make_bulk_figure(dataset_list=si_datasets, n_genes=BULK_N_GENES,
                               include_unsmoothed_analytic=True, show=False)
     fig.savefig(os.path.join(FIGURE_DIR, "figure_SI_bulk.pdf"))
     return fig
@@ -60,7 +68,7 @@ def make_bulk_figure_celltype():
     # the cell-type-metacell counterpart of make_bulk_figure: same datasets
     # and layout, read from the analysis_bulk_celltype pkls instead of the
     # refined ones. n_genes is left at abc's default of 1000, the only gene
-    # panel built for the cell-type h5ads (make_bulk_figure uses 2000).
+    # panel built for the cell-type h5ads (and BULK_N_GENES too).
     os.makedirs(FIGURE_DIR, exist_ok=True)
     fig = abc.make_bulk_figure_celltype(dataset_list=DEFAULT_FIGURE_DATASETS,
                                         show=False)
@@ -75,18 +83,39 @@ def make_MP_figure():
     return fig
 
 
+def _outlier_eigenvalues(spec):
+    """The eigenvalues a spike pkl spec's outliers correspond to: the squares
+    of its "sv" entries. Every spec stores singular values on one scale --
+    the analytic ones are sqrt of the model's eigenvalues
+    (lwa.pca_theory["values"]) and the empirical ones are sv / sqrt(n)
+    (analysis_spike.anndata2spike) -- so squaring gives the eigenvalues of
+    Z^T Z / n on both sides, which is what the manuscript means by the
+    eigenvalues of the scaled count matrix."""
+    return np.asarray(spec["sv"], dtype=float) ** 2
+
+
 def make_spike_spectrum_figure(dataset_list=None, n_genes_list=None, refined=True,
-                        show=True):
-    """Each method's outlier singular values against the LML-RMT prediction
-    at the same rank, pooled over datasets into one panel per method.
+                        HVG_type=None, filename="figure_spectrum.pdf", show=True):
+    """Each method's outlier eigenvalues (squared singular values, see
+    _outlier_eigenvalues) against the LML-RMT prediction at the same rank,
+    pooled over datasets into one panel per method. The panels are titled
+    by method; there is no figure-level title.
+
+    HVG_type selects the partition's spike pkls (see fu.load_spike; None
+    follows refined) and filename the pdf written into FIGURE_DIR, so
+    figures_celltype.make_spike_spectrum_figure_celltype can draw the
+    cell-type version beside this one.
 
     Each panel is annotated in its lower right with "REL ERR: value", the
     per-point median relative error |y - x| / |x| (fu.median_relative_error)
-    computed separately for every dataset and then averaged over datasets --
-    the same summary the within-metacell variance and neighbor-distance
-    figures carry, so the four quantitative figures read alike.
+    of the eigenvalues, computed separately for every dataset and then
+    averaged over datasets -- the same summary the within-metacell variance
+    and neighbor-distance figures carry, so the four quantitative figures
+    read alike. Being taken on eigenvalues rather than singular values, a
+    small error here is about twice what the same points would give on
+    singular values.
     """
-    entries = asp._load_spike_entries(refined, dataset_list, n_genes_list)
+    entries = fu.load_spike_entries(refined, dataset_list, n_genes_list, HVG_type=HVG_type)
     if not entries:
         raise ValueError("no spike pkls found; run make_all_spike_pkl to build them")
 
@@ -96,15 +125,20 @@ def make_spike_spectrum_figure(dataset_list=None, n_genes_list=None, refined=Tru
     cmap = plt.get_cmap("tab10" if len(dataset_names) <= 10 else "tab20")
     colors = {dataset: cmap(i % cmap.N) for i, dataset in enumerate(dataset_names)}
 
+    # 3 in tall rather than the 5 in of the other one-row figures (60% of the
+    # height this figure used to have): the panels are read against the x = y
+    # line only, so a short row loses nothing and keeps the figure from
+    # taking most of a manuscript page. The SI cell-type version inherits it.
     fig, axes = plt.subplots(1, len(SPIKE_SPECTRUM_METHODS),
-                             figsize=(5 * len(SPIKE_SPECTRUM_METHODS), 5),
+                             figsize=(5 * len(SPIKE_SPECTRUM_METHODS), 3),
                              squeeze=False)
 
     # one limit for the whole row rather than per panel: x is the SAME
     # analytic spectrum in every panel, so per-panel limits would differ only
     # by each method's own y max and leave the panels unable to be compared
     # by eye
-    hi = max(max(result["spec_analytic"]["sv"].max(), result[key]["sv"].max())
+    hi = max(max(_outlier_eigenvalues(result["spec_analytic"]).max(),
+                 _outlier_eigenvalues(result[key]).max())
              for _, method in SPIKE_SPECTRUM_METHODS
              for key in [asp.SPEC_KEYS[method]]
              for _, _, result in entries if key in result)
@@ -126,8 +160,8 @@ def make_spike_spectrum_figure(dataset_list=None, n_genes_list=None, refined=Tru
         # so each dataset counts once regardless of how many outliers it has
         rel_err_by_dataset = []
         for dataset, n_genes, result in available:
-            x = np.asarray(result["spec_analytic"]["sv"], dtype=float)
-            y = np.asarray(result[key]["sv"], dtype=float)
+            x = _outlier_eigenvalues(result["spec_analytic"])
+            y = _outlier_eigenvalues(result[key])
             rel_err_by_dataset.append(fu.median_relative_error(x, y))
             ax.scatter(x, y, color=colors[dataset], alpha=0.7,
                        label=fu.display_name(dataset) if dataset not in seen else None)
@@ -138,47 +172,57 @@ def make_spike_spectrum_figure(dataset_list=None, n_genes_list=None, refined=Tru
                 transform=ax.transAxes, ha="right", va="bottom", fontsize=12)
         ax.set_xlim(lim)
         ax.set_ylim(lim)
-        ax.set_xlabel(f"{fu.method_label('RMT')} sv")
-        ax.set_ylabel(f"{fu.method_label(label)} sv")
+        ax.set_xlabel(f"{fu.method_label('RMT')} eigenvalue")
+        ax.set_ylabel(f"{fu.method_label(label)} eigenvalue")
         ax.set_title(fu.method_label(label))
         if j == 0:
-            ax.legend(fontsize=7)
+            # pinned to the upper left, which the points (all near x = y)
+            # leave empty, and in two columns so the eleven entries fit the
+            # short panel; the automatic placement lands on the diagonal
+            ax.legend(fontsize=7, ncol=2, loc="upper left")
 
-    fig.suptitle(f"{'refined' if refined else 'unrefined'} "
-                 f"({len(dataset_names)} datasets)", fontsize=14)
     fig.tight_layout()
 
     os.makedirs(FIGURE_DIR, exist_ok=True)
-    fig.savefig(os.path.join(FIGURE_DIR, "figure_spectrum.pdf"))
+    fig.savefig(os.path.join(FIGURE_DIR, filename))
 
     if show:
         plt.show()
     return fig
 
 
-# the spectra the KS figure draws, left to right; analytic is labelled RMT
-# on the axis (see fu.KS_SPECTRUM_LABELS). normal and perm are left out.
+# the spectra the KS figures draw, left to right; analytic is labelled
+# LML-RMT under its box (fu.method_label). normal and perm are left out.
 KS_SPECTRA = ["analytic", "nb", "true"]
 
 
-def make_KS_figure(show=True):
+def _make_KS_figure(HVG_type, filename, show):
     """One row of the normality-KS boxplots, one panel per dataset in
-    DEFAULT_FIGURE_DATASETS, on refined metacells, showing only the
-    KS_SPECTRA boxes.
+    DEFAULT_FIGURE_DATASETS, on the HVG_type metacell partition ("refined"
+    or "celltype", see fu.compute_normality_KS), showing only the
+    KS_SPECTRA boxes, saved as filename in FIGURE_DIR. The statistic is the
+    KS along fu.KS_DIRECTIONS_PER_DIM * k random directions per metacell
+    (fu.compute_normality_KS); figures_celltype.make_KS_figure_celltype is
+    the cell-type caller.
 
     n_cols is set to the dataset count so fu.make_normality_KS_figure lays
     every dataset out in a single row.
     """
     os.makedirs(FIGURE_DIR, exist_ok=True)
     fig = fu.make_normality_KS_figure(dataset_list=DEFAULT_FIGURE_DATASETS,
-                                      HVG_type="refined",
+                                      HVG_type=HVG_type,
                                       n_cols=len(DEFAULT_FIGURE_DATASETS),
                                       spectra=KS_SPECTRA, show=False)
-    fig.savefig(os.path.join(FIGURE_DIR, "figure_normality_KS.pdf"))
+    fig.savefig(os.path.join(FIGURE_DIR, filename))
 
     if show:
         plt.show()
     return fig
+
+
+def make_KS_figure(show=True):
+    """The KS figure on refined metacells (the manuscript's F:metacell_KS)."""
+    return _make_KS_figure("refined", "figure_normality_KS.pdf", show)
 
 
 # the methods the normality spectrum figure gives a panel, left to right
@@ -194,6 +238,17 @@ def make_normality_spectrum_figure():
         dataset_list=datasets.DEFAULT_DATASETS, n_genes=1000, refined=True,
         methods=NORMALITY_SPECTRUM_METHODS, show=False)
     fig.savefig(os.path.join(FIGURE_DIR, "figure_normality_spectrum.pdf"))
+    return fig
+
+
+def make_metacell_max_var_figure():
+    # the per-dataset figure datasets, one column each, as in the bulk and
+    # KS figures: this figure gives every dataset its own column rather
+    # than pooling them, since the rows compare distributions, not points
+    os.makedirs(FIGURE_DIR, exist_ok=True)
+    fig = fu.make_metacell_max_var_figure(dataset_list=DEFAULT_FIGURE_DATASETS,
+                                           n_genes=1000, refined=True, show=False)
+    fig.savefig(os.path.join(FIGURE_DIR, "figure_metacell_max_var.pdf"))
     return fig
 
 

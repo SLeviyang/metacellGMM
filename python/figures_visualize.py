@@ -38,6 +38,16 @@ MAX_CELL_TYPES = 8
 OTHER_LABEL = "other"
 OTHER_COLOR = (0.8, 0.8, 0.8)
 
+# font sizes of the panel titles and dataset row labels, the histogram axis
+# labels ("density", "projection onto random direction") and the A/B
+# figure-part letters: 50% over the 15, 12 and 22 the figure first used.
+# The ticks and legends are not scaled with them. The chosen metacell's
+# cell count and k are printed and kept on fig.visualize_metacells rather
+# than written inside the panel.
+TITLE_FONTSIZE = 22.5
+AXIS_LABEL_FONTSIZE = 18
+PART_LABEL_FONTSIZE = 33
+
 def _spec_for(result, method):
     """The spec dict a pkl method name refers to; analytic is the reference
     and lives under its own key rather than in asp.SPEC_KEYS."""
@@ -317,8 +327,10 @@ def make_visualize_figure(dataset_list=("PBMC", "Thymus"), n_genes=1000,
     # side via the legend column's own width.
     width_ratios = [1] * n_methods + [0.72] + [0.8] * n_methods
     fig = plt.figure(figsize=(4.2 * sum(width_ratios) + 0.8, 4.2 * n_rows + 1.0))
+    # top leaves room above the titles for the A/B letters at
+    # PART_LABEL_FONTSIZE, which sit 0.04 of the figure height above the axes
     gs = fig.add_gridspec(n_rows, 2 * n_methods + 1, width_ratios=width_ratios,
-                          left=0.03, right=0.99, top=0.92, bottom=0.08,
+                          left=0.03, right=0.99, top=0.90, bottom=0.08,
                           hspace=0.18, wspace=0.12)
     col_b0 = n_methods + 1
 
@@ -341,9 +353,9 @@ def make_visualize_figure(dataset_list=("PBMC", "Thymus"), n_genes=1000,
                              metacell_outline(embedding, mask),
                              metacell_mask=mask)
             if i == 0:
-                ax.set_title(label, fontsize=15)
+                ax.set_title(label, fontsize=TITLE_FONTSIZE)
             if j == 0:
-                ax.set_ylabel(fu.display_name(dataset), fontsize=15)
+                ax.set_ylabel(fu.display_name(dataset), fontsize=TITLE_FONTSIZE)
 
         ax_leg = fig.add_subplot(gs[i, n_methods])
         ax_leg.axis("off")
@@ -366,15 +378,18 @@ def make_visualize_figure(dataset_list=("PBMC", "Thymus"), n_genes=1000,
                                    hist_label="embedding" if is_first else None,
                                    curve_label="LML-RMT normal" if is_first else None)
             if i == 0:
-                ax.set_title(label, fontsize=15)
+                ax.set_title(label, fontsize=TITLE_FONTSIZE)
             if j == 0:
-                ax.set_ylabel("density", fontsize=12)
-                ax.text(0.03, 0.96, f"{proj['n_cells']} cells, k={proj['k']}",
-                        transform=ax.transAxes, ha="left", va="top", fontsize=10)
+                ax.set_ylabel("density", fontsize=AXIS_LABEL_FONTSIZE)
             else:
                 plt.setp(ax.get_yticklabels(), visible=False)
             if i == n_rows - 1:
-                ax.set_xlabel("projection onto random direction", fontsize=12)
+                # the histograms share x, so the block gets ONE label, under
+                # its middle panel: a label under each panel would run into
+                # its neighbours at AXIS_LABEL_FONTSIZE
+                if j == n_methods // 2:
+                    ax.set_xlabel("projection onto random direction",
+                                  fontsize=AXIS_LABEL_FONTSIZE)
             else:
                 plt.setp(ax.get_xticklabels(), visible=False)
             if is_first:
@@ -388,10 +403,10 @@ def make_visualize_figure(dataset_list=("PBMC", "Thymus"), n_genes=1000,
     x_a = gs[0, 0].get_position(fig).x0
     x_b = gs[0, col_b0].get_position(fig).x0
     y_top = gs[0, 0].get_position(fig).y1
-    fig.text(x_a - 0.015, y_top + 0.04, "A", fontsize=22, fontweight="bold",
-             ha="right", va="bottom")
-    fig.text(x_b - 0.015, y_top + 0.04, "B", fontsize=22, fontweight="bold",
-             ha="right", va="bottom")
+    fig.text(x_a - 0.015, y_top + 0.04, "A", fontsize=PART_LABEL_FONTSIZE,
+             fontweight="bold", ha="right", va="bottom")
+    fig.text(x_b - 0.015, y_top + 0.04, "B", fontsize=PART_LABEL_FONTSIZE,
+             fontweight="bold", ha="right", va="bottom")
 
     fig.visualize_metacells = chosen
     if show:

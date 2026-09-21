@@ -10,6 +10,7 @@ Stages, in dependency order, and the scope each one sweeps:
   make_spike     ->  ../analysis_spike_refined/                       (pkl, SPIKE_N_GENES)
                      ../analysis_spike_celltype/                      (pkl, CELLTYPE_N_GENES)
   make_downstream->  ../analysis_knn_refined/, ../analysis_umap_refined/ (pkl, SPIKE_N_GENES)
+                     ../analysis_knn_celltype/                        (pkl, CELLTYPE_N_GENES)
   make_figures   ->  ../figures/                                      (pdf)
 
 make_all runs all five. Stage 1 must precede 2 and 3, which both read the
@@ -42,8 +43,10 @@ import datasets_celltype as dcelltype
 
 import analysis_umap as aumap
 import analysis_knn as aknn
+import analysis_knn_celltype as aknn_celltype
 
 import figures
+import figures_celltype
 import figures_util as fu
 import table
 
@@ -92,11 +95,16 @@ def make_spike(overwrite=False):
 
 
 def make_downstream(overwrite=False):
-    """Build the knn and umap pkls from the refined spike pkls, and the knn
-    replicate errors the knn table reads (beside the knn pkls)."""
+    """Build the knn and umap pkls from the refined spike pkls, the knn
+    replicate errors the knn table reads (beside the knn pkls), and the
+    cell-type knn pkls the Supplementary Information's knn figure reads."""
     print("\n=== knn pkls: refined ===")
     aknn.make_all_knn_pkl(n_genes_list=SPIKE_N_GENES, overwrite=overwrite,
                           refined=True)
+
+    print("\n=== knn pkls: celltype ===")
+    aknn_celltype.make_all_knn_pkl_celltype(n_genes_list=CELLTYPE_N_GENES,
+                                            overwrite=overwrite)
 
     print("\n=== knn replicate errors: refined ===")
     for dataset in datasets.DEFAULT_DATASETS:
@@ -121,6 +129,7 @@ FIGURE_STEPS = [
     ("spike spectrum", figures.make_spike_spectrum_figure, {"show": False}),
     ("KS", figures.make_KS_figure, {"show": False}),
     ("normality spectrum", figures.make_normality_spectrum_figure, {}),
+    ("metacell max var", figures.make_metacell_max_var_figure, {}),
     ("neighbor distance", figures.make_neighbor_distance_figure, {}),
     ("knn", figures.make_knn_figure, {}),
     ("visualize", figures.make_visualize_figure, {"show": False}),
@@ -128,6 +137,9 @@ FIGURE_STEPS = [
     ("datasets table", table.make_datasets_table, {}),
     ("knn table", table.make_knn_table, {}),
     ("processing table", table.make_processing_table, {}),
+    # the Supplementary Information figures (S1-S5), whose cell-type spike
+    # and knn pkls make_spike and make_downstream build
+    *figures_celltype.FIGURE_STEPS,
 ]
 
 

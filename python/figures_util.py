@@ -1,12 +1,15 @@
 import os
 import pickle
+import zlib
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 from scipy.ndimage import gaussian_filter1d
 
 import analysis_bulk as ab
 import analysis_knn as ak
+import analysis_knn_celltype as akc
 import analysis_spike as asp
 import analysis_spike_celltype as asc
 import analysis_spike_util as asu
@@ -50,6 +53,69 @@ def method_label(method):
     """The name a method (analytic/normal/nb/perm/true, or an existing figure
     label such as RMT/NB) is shown under in figures."""
     return METHOD_LABELS.get(method, method)
+
+
+## Spike pkl selection
+
+
+# Every function below that reads the spike pkls takes the older `refined`
+# flag (True: analysis_spike_refined, False: analysis_spike) and an HVG_type
+# that, when given, overrides it: "refined", "unrefined" or "celltype", the
+# last being analysis_spike_celltype's pkls, whose metacells are cell types
+# (datasets_celltype.py) rather than SuperCell/refinement groups. All three
+# carry the same "cell_labels", "spec_analytic", "spec_n", "spec_nb",
+# "spec_perm" and "spec_true" keys, so nothing downstream of the load needs
+# to know which it got. figures_celltype.py is the caller that passes
+# "celltype"; every call in figures.py, make.py and table.py leaves
+# HVG_type at None and so behaves as it always did.
+HVG_TYPES = ("refined", "unrefined", "celltype")
+
+
+def resolve_HVG_type(refined=True, HVG_type=None):
+    """The partition an (refined, HVG_type) pair selects; HVG_type wins."""
+    if HVG_type is None:
+        return "refined" if refined else "unrefined"
+    if HVG_type not in HVG_TYPES:
+        raise ValueError(f"HVG_type must be one of {HVG_TYPES}, got {HVG_type!r}")
+    return HVG_type
+
+
+def has_spike(dataset, n_genes, refined=True, HVG_type=None):
+    HVG_type = resolve_HVG_type(refined, HVG_type)
+    if HVG_type == "celltype":
+        return asc.has_spike_celltype_result(dataset, n_genes)
+    return asp.has_spike_result(dataset, n_genes, refined=(HVG_type == "refined"))
+
+
+def load_spike(dataset, n_genes, refined=True, HVG_type=None):
+    HVG_type = resolve_HVG_type(refined, HVG_type)
+    if HVG_type == "celltype":
+        return asc.load_spike_celltype_result(dataset, n_genes)
+    return asp.load_spike_result(dataset, n_genes, refined=(HVG_type == "refined"))
+
+
+def load_spike_entries(refined=True, dataset_list=None, n_genes_list=None, HVG_type=None):
+    """(dataset, n_genes, result) for every cached spike pkl of the partition,
+    as analysis_spike._load_spike_entries returns them: purely a reader, a
+    combination without a pkl is skipped."""
+    HVG_type = resolve_HVG_type(refined, HVG_type)
+    if HVG_type != "celltype":
+        return asp._load_spike_entries(HVG_type == "refined", dataset_list, n_genes_list)
+    dataset_list = datasets.DEFAULT_DATASETS if dataset_list is None else dataset_list
+    n_genes_list = datasets.DEFAULT_N_GENES if n_genes_list is None else n_genes_list
+    return [(dataset, n_genes, asc.load_spike_celltype_result(dataset, n_genes))
+            for dataset in dataset_list for n_genes in n_genes_list
+            if asc.has_spike_celltype_result(dataset, n_genes)]
+
+
+def load_knn(dataset, n_genes, k_nn=10, refined=True, HVG_type=None):
+    """The partition's knn pkl (analysis_knn.anndata2knn, or
+    analysis_knn_celltype.anndata2knn_celltype for "celltype"), built on
+    first use."""
+    HVG_type = resolve_HVG_type(refined, HVG_type)
+    if HVG_type == "celltype":
+        return akc.anndata2knn_celltype(dataset, n_genes, k_nn=k_nn)
+    return ak.anndata2knn(dataset, n_genes, k_nn=k_nn, refined=(HVG_type == "refined"))
 
 
 ## Bulk figure
@@ -207,7 +273,8 @@ def make_MP_figure(dataset_list=datasets.DEFAULT_DATASETS,
                    smoothing=0.05, min_ev=.001, show=True):
     """A: the true PCA eigenvalue histogram per (dataset, n_genes) against
     the Marchenko-Pastur law and the analytic mixture density (drawn as RMT).
-    B: the SNR of each gene panel's own new genes.
+    B: the SNR of each gene panel's own new genes, titled "signal strength"
+    as the manuscript calls it.
 
     Rows are datasets, columns the entries of n_genes_list plus the SNR
     column. This is the n_genes sweep make_bulk_figure used to carry, kept
@@ -257,7 +324,7 @@ def make_MP_figure(dataset_list=datasets.DEFAULT_DATASETS,
                 ax.legend(fontsize=8)
 
         _add_snr_column(axes[i, -1], dataset, n_genes_list, refined=refined,
-                        title="SNR" if i == 0 else None)
+                        title="signal strength" if i == 0 else None)
 
     # A labels the histogram block, B the SNR column; placed above and to the
     # left of each axes rather than inside it, so they read as figure-part
@@ -282,7 +349,7 @@ NORMALITY_METHODS = [("normal", "spec_n"), ("nb", "spec_nb"),
 
 
 def compute_eigenvalue_spectrum(dataset, n_genes=1000, refined=True,
-                                min_metacell_size=None):
+                                min_metacell_size=None, HVG_type=None):
     """Per-metacell covariance eigenvalues, paired between each method and
     analytic on the same metacell.
 
@@ -311,10 +378,13 @@ def compute_eigenvalue_spectrum(dataset, n_genes=1000, refined=True,
     eigenvalues sit on that same scale rather than the raw per-cell
     covariance one.
 
+    HVG_type selects the partition's spike pkl (see load_spike); None
+    follows refined.
+
     Returns {method: (x, y)}, parallel arrays of length n_metacells * k --
     x analytic's eigenvalues, y the method's.
     """
-    result = asp.load_spike_result(dataset, n_genes, refined=refined)
+    result = load_spike(dataset, n_genes, refined=refined, HVG_type=HVG_type)
     cell_labels = np.asarray(result["cell_labels"])
     spec_analytic = result["spec_analytic"]
     method_specs = [(method, result[key]) for method, key in NORMALITY_METHODS]
@@ -352,7 +422,148 @@ def compute_eigenvalue_spectrum(dataset, n_genes=1000, refined=True,
     return out
 
 
-def compute_outlier_spectrum(dataset, n_genes, refined=True, methods=None):
+# the spectra the max-variance figure histograms, top row to bottom. analytic's
+# value is the LML-RMT prediction itself (lwa.get_GMM), so it carries no
+# pkl key; the others are sample values from the pkl's PC scores
+MAX_VAR_METHODS = [("analytic", None), ("nb", "spec_nb"), ("true", "spec_true")]
+
+
+def compute_metacell_max_var(dataset, n_genes=1000, refined=True,
+                            min_metacell_size=None, HVG_type=None):
+    """Per-metacell variance along the metacell's maximal principal
+    direction in PCA space -- the largest eigenvalue of its covariance
+    Sigma -- for the LML-RMT prediction and for the metacell (nb) and true
+    PCA embeddings (the entries of MAX_VAR_METHODS), each divided by that
+    method's smallest value, so the arrays are unitless ratios >= 1.
+
+    The reference is taken per method and per dataset: v_0 is the
+    smallest value over the metacells of that method's own embedding, and
+    every metacell's value is v_i / v_0. Each panel of the figure
+    therefore starts at exactly 1, and what a panel shows is the spread of
+    metacell widths relative to its own narrowest metacell -- the absolute
+    scale, and any overall under-estimate of the true widths, is removed.
+    (Scaling every method by one shared reference metacell would instead
+    let nb and true dip below 1 where another metacell is narrower in that
+    embedding.)
+
+    For analytic, Sigma is the predicted per-cell covariance of the
+    metacell (lwa.get_GMM on the pkl's pca_theory), truncated to its first
+    k coordinates: the same matrix whose normal density the visualize
+    figure draws. For nb and true, Sigma is the sample covariance of the
+    metacell's rows of U[:, :k] * sv[:k], i.e. the cells centered on the
+    metacell's own mean. The maximal principal direction is each Sigma's
+    OWN top eigenvector, so the direction can differ between methods for
+    the same metacell; only the variance along it is compared.
+
+    Unlike compute_eigenvalue_spectrum, nothing here is rescaled by the
+    cell count: these are per-cell values on the scale of the PC scores
+    themselves, which is the scale get_GMM's covariance is on.
+
+    Uses the same k and the same min_metacell_size floor (default k + 1)
+    as the other normality figures, and applies the floor to all three
+    methods, so the rows of the figure histogram the SAME metacells.
+
+    HVG_type selects the partition's spike pkl (see load_spike); None
+    follows refined.
+
+    Returns {method: values}, one array of scaled values per entry of
+    MAX_VAR_METHODS, each of length n_metacells in np.unique's label order.
+    """
+    result = load_spike(dataset, n_genes, refined=refined, HVG_type=HVG_type)
+    cell_labels = np.asarray(result["cell_labels"])
+    pca_theory = result["pca_theory"]
+    specs = {method: result[key] for method, key in MAX_VAR_METHODS if key is not None}
+
+    k = min([len(pca_theory["values"])] + [len(spec["sv"]) for spec in specs.values()])
+    if min_metacell_size is None:
+        min_metacell_size = k + 1
+
+    labels, sizes = np.unique(cell_labels, return_counts=True)
+    labels = labels[sizes >= min_metacell_size]
+
+    def max_var(cov):
+        # eigvalsh sorts ascending, so [-1] is the largest eigenvalue
+        return np.linalg.eigvalsh(cov)[-1]
+
+    out = {"analytic": np.array([
+        max_var(np.asarray(lwa.get_GMM(pca_theory, label)["covariance"])[:k, :k])
+        for label in labels])}
+    for method, spec in specs.items():
+        scores = np.asarray(spec["U"])[:, :k] * np.asarray(spec["sv"])[:k]
+        out[method] = np.array([
+            max_var(np.cov(scores[cell_labels == label, :], rowvar=False))
+            for label in labels])
+
+    # each method scaled by its own narrowest metacell, so every panel's
+    # minimum is exactly 1
+    return {method: values / values.min() for method, values in out.items()}
+
+
+def make_metacell_max_var_figure(dataset_list=datasets.DEFAULT_DATASETS,
+                                  n_genes=1000, refined=True, HVG_type=None,
+                                  n_bins=30, show=True):
+    """Histograms over metacells of the scaled variance along each
+    metacell's maximal principal direction in PCA space
+    (compute_metacell_max_var: the variance divided by the panel's
+    smallest, so every panel starts at 1): rows are the entries of
+    MAX_VAR_METHODS -- the LML-RMT prediction, then the metacell and true
+    embeddings -- and columns are datasets.
+
+    The x axis is logarithmic in base 2, with the ticks labelled by the
+    ratio itself (1, 2, 4, 8, ...) rather than by its exponent, and no
+    minor tick labels. Every panel shares ONE x range and one set of
+    log-spaced bins, from 1 to the largest ratio over all datasets and
+    methods, so widths are read on the same scale across the whole figure;
+    y is shared down each column only, since the datasets have different
+    metacell counts. The scaling removes the absolute scale, so what a
+    panel shows is how spread out its metacell widths are relative to its
+    own narrowest metacell.
+
+    Each column's top panel is titled with the dataset and the number of
+    metacells retained by compute_metacell_max_var's k + 1 floor; the
+    rows are labelled on the first column through method_label.
+    """
+    n_rows, n_cols = len(MAX_VAR_METHODS), len(dataset_list)
+
+    # every dataset first: the shared bins need the global maximum
+    ratios = {dataset: compute_metacell_max_var(dataset, n_genes, refined=refined,
+                                                 HVG_type=HVG_type)
+              for dataset in dataset_list}
+    hi = max(v.max() for per_method in ratios.values() for v in per_method.values())
+    bins = np.geomspace(1, hi, n_bins + 1)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 3.5 * n_rows),
+                             sharex=True, sharey="col", squeeze=False)
+
+    for j, dataset in enumerate(dataset_list):
+        values = ratios[dataset]
+        for i, (method, _) in enumerate(MAX_VAR_METHODS):
+            ax = axes[i, j]
+            ax.hist(values[method], bins=bins, alpha=0.7, color="#a9a9a9")
+            ax.set_xscale("log", base=2)
+            # powers of two, labelled as plain ratios rather than 2^k, and
+            # the minor ticks left unlabelled
+            ax.xaxis.set_major_locator(LogLocator(base=2))
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+            ax.xaxis.set_minor_formatter(NullFormatter())
+            ax.tick_params(labelsize=13)
+            if i == 0:
+                ax.set_title(f"{display_name(dataset)} ({len(values[method])} metacells)",
+                             fontsize=20)
+            if i == n_rows - 1:
+                ax.set_xlabel("scaled maximal variance", fontsize=16)
+            if j == 0:
+                ax.set_ylabel(method_label(method), fontsize=20)
+
+    axes[0, 0].set_xlim(1, hi)
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig
+
+
+def compute_outlier_spectrum(dataset, n_genes, refined=True, methods=None,
+                             HVG_type=None):
     """{method: (x, y)} of outlier singular values for one dataset: x is
     the LML-RMT (analytic) prediction and y the method's numerically
     computed value at the same rank, both sorted descending, read from the
@@ -368,7 +579,7 @@ def compute_outlier_spectrum(dataset, n_genes, refined=True, methods=None):
     compute_neighbor_distance_ratios return, so median_relative_error
     applies to it unchanged.
     """
-    result = asp.load_spike_result(dataset, n_genes, refined=refined)
+    result = load_spike(dataset, n_genes, refined=refined, HVG_type=HVG_type)
     x = np.asarray(result["spec_analytic"]["sv"], dtype=float)
     if methods is None:
         methods = [m for m, key in asp.SPEC_KEYS.items() if key in result]
@@ -403,14 +614,27 @@ def median_relative_error(x, y):
     return float(np.median(np.abs(y - x) / np.abs(x)))
 
 
+# axis label size of the normality spectrum and neighbor distance figures,
+# which are read side by side: 16.9 is 30% over the 13 their ticks use
+SCATTER_LABEL_FONTSIZE = 16.9
+# the one colour the pooled scatters (normality spectrum and neighbor
+# distance figures) draw every point in: the datasets are not distinguished
+# and no legend is drawn. It is the steelblue analysis_knn._plot_adjacency_values
+# uses when given no groups, so the knn figure matches.
+SCATTER_COLOR = "steelblue"
+
+
 def make_normality_spectrum_figure(dataset_list=datasets.DEFAULT_DATASETS,
                                    n_genes=1000, refined=True,
                                    min_metacell_size=None, methods=None,
-                                   show=True):
+                                   HVG_type=None, show=True):
     """Each method's per-metacell covariance eigenvalues against analytic's
     on the same metacell and the same rank, pooled across every dataset in
     dataset_list into one panel per method: a single row with one panel
     per entry of methods, rather than one row per dataset.
+
+    HVG_type selects the partition's spike pkl (see load_spike); None
+    follows refined.
 
     methods lists which of compute_eigenvalue_spectrum's methods ("normal",
     "nb", "perm", "true") get a panel, in that left-to-right order; None
@@ -423,10 +647,10 @@ def make_normality_spectrum_figure(dataset_list=datasets.DEFAULT_DATASETS,
     per-dataset medians, so each dataset counts once regardless of how
     many points it contributes.
 
-    Points are coloured by dataset (a legend on the first panel maps colour
-    to dataset), so points from the same dataset are not merged into the
-    same scatter -- this is a per-dataset plot call, not a pooled one,
-    unlike the earlier version of this figure.
+    Every point is drawn in SCATTER_COLOR and no legend is drawn, so the
+    datasets are not distinguished. The scatter is still one call per
+    dataset, since the per-dataset relative errors are collected in the
+    same loop.
 
     All panels share one axis range, computed from every dataset's points
     together, so the methods are read on an identical scale;
@@ -446,7 +670,8 @@ def make_normality_spectrum_figure(dataset_list=datasets.DEFAULT_DATASETS,
 
     spectra_by_dataset = {
         dataset: compute_eigenvalue_spectrum(
-            dataset, n_genes, refined=refined, min_metacell_size=min_metacell_size)
+            dataset, n_genes, refined=refined, min_metacell_size=min_metacell_size,
+            HVG_type=HVG_type)
         for dataset in dataset_list}
 
     # the shared axis range only looks at the methods actually drawn, so a
@@ -457,12 +682,6 @@ def make_normality_spectrum_figure(dataset_list=datasets.DEFAULT_DATASETS,
     hi = max(max(x.max(), y.max()) for x, y in drawn) * 1.5
     lim = [lo, hi]
 
-    # tab10/tab20 are qualitative palettes meant for exactly this many
-    # categories; falls back to cycling tab20 if there are more datasets
-    # than either provides
-    cmap = plt.get_cmap("tab10" if len(dataset_list) <= 10 else "tab20")
-    colors = {dataset: cmap(i % cmap.N) for i, dataset in enumerate(dataset_list)}
-
     fig, axes = plt.subplots(1, len(methods), figsize=(5 * len(methods), 4.5),
                              squeeze=False)
 
@@ -472,8 +691,7 @@ def make_normality_spectrum_figure(dataset_list=datasets.DEFAULT_DATASETS,
         for dataset in dataset_list:
             x, y = spectra_by_dataset[dataset][method]
             rel_err_by_dataset.append(median_relative_error(x, y))
-            ax.scatter(x, y, color=colors[dataset], s=6, alpha=0.4,
-                      edgecolors="none", label=display_name(dataset))
+            ax.scatter(x, y, color=SCATTER_COLOR, s=6, alpha=0.4, edgecolors="none")
         ax.plot(lim, lim, color="black", ls="--", lw=1)
         ax.text(0.97, 0.03, f"REL ERR: {np.mean(rel_err_by_dataset):.3g}",
                 transform=ax.transAxes, ha="right", va="bottom", fontsize=12)
@@ -483,12 +701,11 @@ def make_normality_spectrum_figure(dataset_list=datasets.DEFAULT_DATASETS,
         ax.set_xlim(lim)
         ax.set_ylim(lim)
         ax.tick_params(labelsize=13)
-        # the y label alone names the panel's method; there is no title.
-        # 13 is 30% over matplotlib's default "medium" label size of 10
-        ax.set_xlabel(f"{method_label('analytic')} variance", fontsize=13)
-        ax.set_ylabel(f"{method_label(method)} variance", fontsize=13)
-        if j == 0:
-            ax.legend(fontsize=7, markerscale=2.5, loc="upper left")
+        # the y label alone names the panel's method; there is no title
+        ax.set_xlabel(f"{method_label('analytic')} variance",
+                      fontsize=SCATTER_LABEL_FONTSIZE)
+        ax.set_ylabel(f"{method_label(method)} variance",
+                      fontsize=SCATTER_LABEL_FONTSIZE)
 
     fig.tight_layout()
     if show:
@@ -496,45 +713,57 @@ def make_normality_spectrum_figure(dataset_list=datasets.DEFAULT_DATASETS,
     return fig
 
 
+# the KS figures project each metacell onto KS_DIRECTIONS_PER_DIM * k random
+# unit directions of the k-dimensional PCA space rather than onto the k
+# eigenvectors of its own covariance (normality.metacell_normality, which the
+# refinement step in datasets_refined still uses). The eigenvector basis
+# singles out the few low-variance directions of a large metacell that load
+# on genes the model says are absent from it, along which the metacell
+# model's count noise is discrete and far from normal; random directions
+# blend those with the rest and so test the typical direction. The
+# directions are drawn once per metacell, from a generator seeded by
+# KS_DIRECTION_SEED and the dataset name, and reused for every spectrum of
+# that metacell, so the spectra are compared on the same directions.
+KS_DIRECTIONS_PER_DIM = 10
+KS_DIRECTION_SEED = 0
+
+
+def random_unit_directions(k, n_directions, rng):
+    """n_directions independent unit vectors of R^k, as columns."""
+    G = rng.standard_normal((k, n_directions))
+    return G / np.linalg.norm(G, axis=0)
+
+
+def ks_along_directions(X, directions):
+    """The KS statistic of X (cells x k) projected onto each column of
+    directions: normality.max_ecdf_normal_diff against a normal fitted to
+    that projection's own mean and sd, so every value is self-referential
+    and invariant to the sign and length of the direction."""
+    proj = X @ directions
+    return np.array([nrm.max_ecdf_normal_diff(proj[:, j], proj[:, j].mean(), proj[:, j].std())
+                     for j in range(proj.shape[1])])
+
+
 def compute_normality_KS(dataset, n_genes=1000, HVG_type="refined", min_metacell_size=None):
-    """Per-metacell, per-eigenvector-axis KS statistic, self-referential
-    for each spectrum: analytic, normal, nb, perm, true each projected onto
-    their OWN metacell covariance eigenvectors, not a shared or rotated
-    basis.
+    """Per-metacell, per-direction KS statistic, self-referential for each
+    spectrum: analytic, normal, nb, perm, true each projected onto the SAME
+    KS_DIRECTIONS_PER_DIM * k random unit directions of PCA space (see the
+    note above KS_DIRECTIONS_PER_DIM), ks_along_directions giving the KS
+    statistic of every projection against a normal fitted to its own mean
+    and sd -- so one metacell contributes 10k values per spectrum, not one.
 
-    For one metacell and one spectrum, this is exactly
-    normality.metacell_normality(X, return_per_axis=True): X's own
-    covariance eigenvectors (descending eigenvalue), X projected onto them,
-    and normality.max_ecdf_normal_diff (the KS statistic against a normal
-    fitted to that projection's own mean/std) evaluated on every axis
-    rather than maxed over them -- so one metacell contributes k values,
-    not one.
-
-    HVG_type selects which spike pkl the spectra are read from: "refined"
-    and "unrefined" both come from analysis_spike.load_spike_result (the
-    old refined=True/False), "celltype" from
-    analysis_spike_celltype.load_spike_celltype_result, whose metacells are
-    cell types (see datasets_celltype.py) rather than SuperCell/refinement
-    groups. All three return a dict with the same "cell_labels",
-    "spec_analytic", "spec_n", "spec_nb", "spec_perm", "spec_true" keys, so
-    nothing below this dispatch needs to know which one it got.
+    HVG_type selects which spike pkl the spectra are read from (see
+    load_spike): "refined", "unrefined" or "celltype".
 
     Uses the same k and the same min_metacell_size floor (default k + 1) as
     the other normality figures, for the same reason: below it the
-    covariance is rank deficient and its trailing eigenvectors are
-    arbitrary.
+    covariance is rank deficient.
 
     Returns {spectrum: values}, one flat array per spectrum ("analytic",
-    "normal", "nb", "perm", "true") of length n_metacells * k, pooling
-    every metacell's per-axis values together.
+    "normal", "nb", "perm", "true") of length n_metacells * 10k, pooling
+    every metacell's per-direction values together.
     """
-    if HVG_type == "celltype":
-        result = asc.load_spike_celltype_result(dataset, n_genes)
-    elif HVG_type in ("refined", "unrefined"):
-        result = asp.load_spike_result(dataset, n_genes, refined=(HVG_type == "refined"))
-    else:
-        raise ValueError(f"HVG_type must be 'refined', 'unrefined', or 'celltype', "
-                         f"got {HVG_type!r}")
+    result = load_spike(dataset, n_genes, HVG_type=HVG_type)
     cell_labels = np.asarray(result["cell_labels"])
     spec_analytic = result["spec_analytic"]
     all_specs = [("analytic", spec_analytic)] + [(method, result[key])
@@ -547,10 +776,16 @@ def compute_normality_KS(dataset, n_genes=1000, HVG_type="refined", min_metacell
     labels, sizes = np.unique(cell_labels, return_counts=True)
     labels = labels[sizes >= min_metacell_size]
 
+    # zlib.crc32 rather than hash(): Python's string hash changes from one
+    # process to the next, and the directions must not
+    rng = np.random.default_rng([KS_DIRECTION_SEED, zlib.crc32(dataset.encode())])
+    directions = {label: random_unit_directions(k, KS_DIRECTIONS_PER_DIM * k, rng)
+                  for label in labels}
+
     out = {}
     for name, spec in all_specs:
         scores = spec["U"][:, :k] * spec["sv"][:k]
-        values = [nrm.metacell_normality(scores[cell_labels == label, :], return_per_axis=True)
+        values = [ks_along_directions(scores[cell_labels == label, :], directions[label])
                   for label in labels]
         out[name] = np.concatenate(values)
     return out
@@ -569,15 +804,17 @@ def make_normality_KS_figure(dataset_list=datasets.DEFAULT_DATASETS,
                              min_metacell_size=None, n_cols=4, spectra=None,
                              show=True):
     """One box per spectrum per dataset: the pooled distribution over
-    metacells (and eigenvector axis) of the KS statistic against a normal
-    fitted along that axis (see compute_normality_KS), with the chosen
+    metacells (and random direction) of the KS statistic against a normal
+    fitted along that direction (see compute_normality_KS), with the chosen
     spectra as boxplots side by side in a single panel per dataset, laid
     out with n_cols dataset panels per row. Outlier points are suppressed
     (showfliers=False) since these pool thousands of values and would
     otherwise be mostly a cloud of dots.
 
     HVG_type is "refined", "unrefined", or "celltype" -- see
-    compute_normality_KS for what each one loads.
+    compute_normality_KS for what each one loads. figures.make_KS_figure
+    draws the refined one and figures.make_KS_figure_celltype the cell-type
+    one, with identical layout so the two read as a pair.
 
     spectra lists which of compute_normality_KS's spectra ("analytic",
     "normal", "nb", "perm", "true") to draw, in that left-to-right order;
@@ -608,10 +845,13 @@ def make_normality_KS_figure(dataset_list=datasets.DEFAULT_DATASETS,
         ax.boxplot(values, positions=range(len(panels)), showfliers=False)
         ax.set_xticks(range(len(panels)))
         ax.set_xticklabels(tick_labels)
-        ax.tick_params(labelsize=13)
+        # the tick labels (the method names under the boxes and the y ticks)
+        # and the y label are 25% over the 13 and 14 the other per-dataset
+        # figures use; the titles stay at 20
+        ax.tick_params(labelsize=16.25)
         ax.set_title(f"{display_name(dataset)} ({len(values[0])} points)", fontsize=20)
         if i % n_cols == 0:
-            ax.set_ylabel("max |ECDF - normal CDF|", fontsize=14)
+            ax.set_ylabel("KS", fontsize=17.5)
 
     # a dataset count that does not fill the last row leaves empty panels
     for j in range(len(dataset_list), n_rows * n_cols):
@@ -627,7 +867,7 @@ def make_normality_KS_figure(dataset_list=datasets.DEFAULT_DATASETS,
 
 
 def compute_neighbor_moments(dataset, n_genes=1000, refined=True,
-                             min_metacell_size=None, n_neighbors=5):
+                             min_metacell_size=None, n_neighbors=5, HVG_type=None):
     """Per-metacell diff and sd, evaluated independently in the method's own
     space and in analytic's own space, on the neighbor pair(s) each space's
     OWN topology picks out.
@@ -670,11 +910,14 @@ def compute_neighbor_moments(dataset, n_genes=1000, refined=True,
     covariance is rank deficient. n_neighbors is clamped to at most
     n_metacells - 1, so a dataset with very few metacells still works.
 
+    HVG_type selects the partition's spike pkl (see load_spike); None
+    follows refined.
+
     Returns {method: (diff_analytic, sd_analytic, diff_method, sd_method)},
     parallel arrays with n_neighbors to 2 * n_neighbors entries per
     metacell, depending on how much the two spaces' neighbor lists overlap.
     """
-    result = asp.load_spike_result(dataset, n_genes, refined=refined)
+    result = load_spike(dataset, n_genes, refined=refined, HVG_type=HVG_type)
     cell_labels = np.asarray(result["cell_labels"])
     spec_analytic = result["spec_analytic"]
     method_specs = [(method, result[key]) for method, key in NORMALITY_METHODS]
@@ -730,7 +973,8 @@ def compute_neighbor_moments(dataset, n_genes=1000, refined=True,
 
 
 def compute_neighbor_distance_ratios(dataset, n_genes=1000, refined=True,
-                                     min_metacell_size=None, n_neighbors=5):
+                                     min_metacell_size=None, n_neighbors=5,
+                                     HVG_type=None):
     """diff/sd per neighbor pair, in analytic's space (x) and the method's
     (y) -- see compute_neighbor_moments for how the pairs and the two
     quantities are defined.
@@ -739,7 +983,7 @@ def compute_neighbor_distance_ratios(dataset, n_genes=1000, refined=True,
     """
     moments = compute_neighbor_moments(dataset, n_genes, refined=refined,
                                        min_metacell_size=min_metacell_size,
-                                       n_neighbors=n_neighbors)
+                                       n_neighbors=n_neighbors, HVG_type=HVG_type)
     return {method: (diff_a / sd_a, diff_m / sd_m)
            for method, (diff_a, sd_a, diff_m, sd_m) in moments.items()}
 
@@ -748,16 +992,19 @@ def compute_neighbor_distance_ratios(dataset, n_genes=1000, refined=True,
 
 def make_neighbor_distance_figure(dataset_list=datasets.DEFAULT_DATASETS,
                                   n_genes=1000, refined=True,
-                                  min_metacell_size=None, n_neighbors=5, show=True):
+                                  min_metacell_size=None, n_neighbors=5, HVG_type=None,
+                                  show=True):
     """Each method's per-neighbor-pair diff/sd against analytic's on the
     same pair (see compute_neighbor_distance_ratios), pooled across every
     dataset in dataset_list into one panel per method: a single row of
     four panels (normal/nb/perm/true), rather than one row per dataset.
 
-    Points are coloured by dataset (a legend on the first panel maps colour
-    to dataset; the x = y and fit lines are unlabelled so the legend lists
-    only datasets), one scatter call per dataset rather than one pooled
-    call, as in make_normality_spectrum_figure.
+    HVG_type selects the partition's spike pkl (see load_spike); None
+    follows refined.
+
+    Every point is drawn in SCATTER_COLOR and no legend is drawn, so the
+    datasets are not distinguished; the scatter is still one call per
+    dataset, as in make_normality_spectrum_figure.
 
     All four panels share one axis range, set from the 99th percentile of
     every method's pooled points together rather than the max, since the
@@ -782,7 +1029,7 @@ def make_neighbor_distance_figure(dataset_list=datasets.DEFAULT_DATASETS,
     ratios_by_dataset = {
         dataset: compute_neighbor_distance_ratios(
             dataset, n_genes, refined=refined, min_metacell_size=min_metacell_size,
-            n_neighbors=n_neighbors)
+            n_neighbors=n_neighbors, HVG_type=HVG_type)
         for dataset in dataset_list}
     pooled = {
         method: (np.concatenate([ratios_by_dataset[d][method][0] for d in dataset_list]),
@@ -793,12 +1040,6 @@ def make_neighbor_distance_figure(dataset_list=datasets.DEFAULT_DATASETS,
             for x, y in pooled.values()) * 1.05
     lim = [0, hi]
 
-    # tab10/tab20 are qualitative palettes meant for exactly this many
-    # categories; falls back to cycling tab20 if there are more datasets
-    # than either provides
-    cmap = plt.get_cmap("tab10" if len(dataset_list) <= 10 else "tab20")
-    colors = {dataset: cmap(i % cmap.N) for i, dataset in enumerate(dataset_list)}
-
     fig, axes = plt.subplots(1, len(methods), figsize=(5 * len(methods), 4.5),
                              squeeze=False)
 
@@ -808,8 +1049,7 @@ def make_neighbor_distance_figure(dataset_list=datasets.DEFAULT_DATASETS,
         for dataset in dataset_list:
             x, y = ratios_by_dataset[dataset][method]
             rel_err_by_dataset.append(median_relative_error(x, y))
-            ax.scatter(x, y, color=colors[dataset], s=6, alpha=0.3,
-                       edgecolors="none", label=display_name(dataset))
+            ax.scatter(x, y, color=SCATTER_COLOR, s=6, alpha=0.3, edgecolors="none")
         ax.plot(lim, lim, color="black", ls="--", lw=1)
 
         # fitted on every pooled point, not just the ones inside the view,
@@ -825,12 +1065,11 @@ def make_neighbor_distance_figure(dataset_list=datasets.DEFAULT_DATASETS,
         ax.set_xlim(lim)
         ax.set_ylim(lim)
         ax.tick_params(labelsize=13)
-        # the y label alone names the panel's method; there is no title.
-        # 13 matches make_normality_spectrum_figure's label size
-        ax.set_xlabel(f"{method_label('analytic')} diff/sd", fontsize=13)
-        ax.set_ylabel(f"{method_label(method)} diff/sd", fontsize=13)
-        if j == 0:
-            ax.legend(fontsize=7, markerscale=2.5, loc="upper left")
+        # the y label alone names the panel's method; there is no title
+        ax.set_xlabel(f"{method_label('analytic')} diff/sd",
+                      fontsize=SCATTER_LABEL_FONTSIZE)
+        ax.set_ylabel(f"{method_label(method)} diff/sd",
+                      fontsize=SCATTER_LABEL_FONTSIZE)
 
     fig.tight_layout()
     if show:
@@ -920,7 +1159,7 @@ def make_neighbor_sd_figure(dataset_list=datasets.DEFAULT_DATASETS,
 ### k-NN figures
 
 
-def compute_knn_edge_fractions(dataset, n_genes, k_nn=10, refined=True):
+def compute_knn_edge_fractions(dataset, n_genes, k_nn=10, refined=True, HVG_type=None):
     """{method: edge fractions} for one (dataset, n_genes), analytic included.
 
     Each method's per-cell k-NN indices are aggregated to a mixture x mixture
@@ -933,14 +1172,17 @@ def compute_knn_edge_fractions(dataset, n_genes, k_nn=10, refined=True):
     Every method shares the pkl's one mixture_order, so the arrays are
     row-aligned across methods and can be scattered against each other.
 
+    HVG_type selects the partition's spike and knn pkls (see load_spike and
+    load_knn); None follows refined.
+
     A method the pkl does not carry is simply absent from the returned dict;
     the caller blanks that panel. Returns None if the pkl cannot be built or
     read at all.
     """
-    if not asp.has_spike_result(dataset, n_genes, refined=refined):
+    if not has_spike(dataset, n_genes, refined=refined, HVG_type=HVG_type):
         return None
     try:
-        knn_result = ak.anndata2knn(dataset, n_genes, k_nn=k_nn, refined=refined)
+        knn_result = load_knn(dataset, n_genes, k_nn=k_nn, refined=refined, HVG_type=HVG_type)
     except ValueError as e:
         print(f"  SKIPPING {dataset}/{n_genes}: {e}")
         return None
@@ -960,11 +1202,14 @@ def compute_knn_edge_fractions(dataset, n_genes, k_nn=10, refined=True):
 
 
 def compute_knn_edge_fraction_pairs(dataset, n_genes_list=datasets.DEFAULT_N_GENES,
-                                    k_nn=10, refined=True):
+                                    k_nn=10, refined=True, HVG_type=None):
     """{method: (x, y)} for one dataset: analytic's k-NN mixture-pair edge
     fractions (x) against the method's on the same pairs (y), as returned by
     compute_knn_edge_fractions, pooled over every n_genes in n_genes_list
     that has a readable pkl (only 1000 is cached in practice).
+
+    HVG_type selects the partition's spike pkl (see load_spike); None
+    follows refined.
 
     A method absent from every pkl is absent from the dict, and a dataset
     with no readable pkl gives an empty dict, so callers can leave such a
@@ -975,7 +1220,7 @@ def compute_knn_edge_fraction_pairs(dataset, n_genes_list=datasets.DEFAULT_N_GEN
     pooled = {}
     for n_genes in n_genes_list:
         fractions = compute_knn_edge_fractions(dataset, n_genes, k_nn=k_nn,
-                                               refined=refined)
+                                               refined=refined, HVG_type=HVG_type)
         if fractions is None or "analytic" not in fractions:
             continue
         for method in methods:
@@ -1083,9 +1328,16 @@ def compute_knn_replicate_errors(dataset, n_genes=1000, n_rep=20, k_nn=10,
     return errors
 
 
+# the k-NN figure's axis label and panel title sizes: 50% over matplotlib's
+# defaults of 10 ("medium") and 12 ("large"), which _plot_adjacency_values
+# otherwise leaves in place for analysis_knn's own diagnostic plots
+KNN_LABEL_FONTSIZE = 15
+KNN_TITLE_FONTSIZE = 18
+
+
 def make_knn_figure(dataset_list=datasets.DEFAULT_DATASETS,
                     n_genes_list=datasets.DEFAULT_N_GENES, k_nn=10,
-                    refined=True, show=True):
+                    refined=True, HVG_type=None, show=True):
     """Each method's k-NN mixture-pair edge fractions against analytic's on
     the same pairs, pooled across every dataset in dataset_list into one
     panel per method: a single row of four panels (normal/nb/perm/true), as
@@ -1100,11 +1352,14 @@ def make_knn_figure(dataset_list=datasets.DEFAULT_DATASETS,
     that function's cube-root axes, y = x line and linear-space red dashed
     fit curve, the fit taken on the pooled points of every dataset -- the
     edge fractions pile up near zero (only ~3% of pairs reach 0.1), which a
-    linear axis would crush into the corner. Points are coloured by dataset
-    through its groups/group_colors arguments, and the first panel carries
-    a legend of the datasets that contributed (the x = y line, which that
-    function also labels, is kept out of it). Each panel's axis range is
-    set from its own points, as that function does.
+    linear axis would crush into the corner. No groups are passed, so every
+    point is drawn in that function's single colour and no legend is drawn:
+    the datasets are not distinguished. Each panel's axis range is set from
+    its own points, as that function does.
+
+    Its axis labels and panel titles are drawn at KNN_LABEL_FONTSIZE and
+    KNN_TITLE_FONTSIZE; the panels are titled by method and there is no
+    figure-level title.
 
     Its fit summary text is replaced by "REL ERR: value" in the lower right,
     as in make_normality_spectrum_figure and make_neighbor_distance_figure:
@@ -1116,39 +1371,29 @@ def make_knn_figure(dataset_list=datasets.DEFAULT_DATASETS,
     method does are drawn (on the y axis) but do not enter the value. The
     per-dataset values themselves are what table.make_knn_table tabulates.
 
+    HVG_type selects the partition's spike pkl (see load_spike); None
+    follows refined.
+
     Several n_genes are pooled for a dataset if n_genes_list has more than
     one entry (compute_knn_edge_fraction_pairs); only n_genes=1000 is
     cached in practice.
 
-    A dataset with no readable k-NN pkl is left out of every panel (and of
-    the legend), and a method absent from every pkl blanks just that panel,
+    A dataset with no readable k-NN pkl is left out of every panel, and a
+    method absent from every pkl blanks just that panel,
     rather than raising -- so a partly built cache still plots.
     """
     methods = [method for method, _ in NORMALITY_METHODS]
 
-    # per method: one x, y and dataset-label array per contributing dataset,
-    # plus that dataset's relative error, all appended in dataset_list order
-    pooled = {method: {"x": [], "y": [], "ds": [], "rel_err": []}
-              for method in methods}
-    plotted_datasets = []
+    # per method: one x and y array per contributing dataset, plus that
+    # dataset's relative error, all appended in dataset_list order
+    pooled = {method: {"x": [], "y": [], "rel_err": []} for method in methods}
     for dataset in dataset_list:
         pairs = compute_knn_edge_fraction_pairs(dataset, n_genes_list, k_nn=k_nn,
-                                                refined=refined)
-        if pairs:
-            plotted_datasets.append(dataset)
+                                                refined=refined, HVG_type=HVG_type)
         for method, (x, y) in pairs.items():
             pooled[method]["x"].append(x)
             pooled[method]["y"].append(y)
-            pooled[method]["ds"].append(np.full(x.shape, display_name(dataset)))
             pooled[method]["rel_err"].append(knn_relative_error(x, y))
-
-    # tab10/tab20 are qualitative palettes meant for exactly this many
-    # categories, as in make_neighbor_distance_figure; indexed by position
-    # in dataset_list so a dataset keeps its colour if a later one drops out.
-    # Keyed by display name, which is what the group labels above carry.
-    cmap = plt.get_cmap("tab10" if len(dataset_list) <= 10 else "tab20")
-    colors = {display_name(dataset): cmap(i % cmap.N)
-              for i, dataset in enumerate(dataset_list)}
 
     fig, axes = plt.subplots(1, len(methods), figsize=(5.5 * len(methods), 5.5),
                              squeeze=False)
@@ -1163,24 +1408,13 @@ def make_knn_figure(dataset_list=datasets.DEFAULT_DATASETS,
 
         ak._plot_adjacency_values(
             ax, np.concatenate(entry["x"]), np.concatenate(entry["y"]),
-            groups=np.concatenate(entry["ds"]), group_colors=colors,
             xlabel=f"fraction of edges ({method_label('analytic')})",
             ylabel=f"fraction of edges ({method_label(method)})",
             title=method_label(method),
-            annotation=f"REL ERR: {np.nanmean(entry['rel_err']):.3g}")
-        if j == 0:
-            # the dataset scatters only: _plot_adjacency_values also labels
-            # its x = y line, which would otherwise join the legend
-            handles, labels = ax.get_legend_handles_labels()
-            shown = [(h, l) for h, l in zip(handles, labels) if l in colors]
-            ax.legend([h for h, _ in shown], [l for _, l in shown],
-                      fontsize=7, loc="upper left")
+            annotation=f"REL ERR: {np.nanmean(entry['rel_err']):.3g}",
+            label_fontsize=KNN_LABEL_FONTSIZE, title_fontsize=KNN_TITLE_FONTSIZE)
 
-    fig.suptitle(f"k-NN mixture-pair edge fractions: {method_label('analytic')} (x) vs each "
-                 f"method (y)\n{'refined' if refined else 'unrefined'} "
-                 f"partition, k_nn={k_nn}, {len(plotted_datasets)} datasets",
-                 fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    fig.tight_layout()
     if show:
         plt.show()
     return fig
