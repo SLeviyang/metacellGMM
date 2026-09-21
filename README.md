@@ -1,5 +1,5 @@
 
-This repo contains the code used in the manuscript, **A Metacell Model for Single Cell RNA-seq Counts Yields a Gaussian
+This repo contains the code used in the manuscript, **A Metacell Model of Single Cell RNA-seq Counts Yields a Gaussian
 Mixture Model in PCA Space**, *BioRxiv*
 
 The code is arranged as a pipeline composed of five stages:
